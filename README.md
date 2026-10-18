@@ -296,6 +296,9 @@ This is a research prototype, and its limits are stated openly:
 ---
 
 ## Publication
+<p align="center">
+  <img src="assets/Images/paper_accepted.jpeg" alt="ICAIN 2026 paper acceptance" width="420">
+</p>
 
 > **AI Driven UAV Mission Reliability System**
 > Accepted at **ICAIN 2026**, International Conference on Artificial Intelligence and Networking (Elsevier).
