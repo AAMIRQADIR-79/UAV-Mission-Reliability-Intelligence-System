@@ -1,49 +1,58 @@
 """
 terrain.py - Terrain Elevation Awareness for UAV Mission System
 
-Fetches REAL ground elevation data (from Open-Elevation API, free, no key needed)
-at every waypoint, and checks whether the drone's planned altitude gives it
-safe clearance above the actual terrain - not just a flat assumed ground.
+Fetches REAL ground elevation data (Open-Elevation API) at every waypoint.
+Uses POST (avoids URL length limits on long routes), retries on failure,
+longer timeout, and NEVER silently pretends fake data is real - the
+caller always knows whether data is LIVE or SIMULATED.
 """
 
 import requests
 import random
+import time
 
 
-# ─────────────────────────────────────────────
-# FETCH REAL ELEVATION FOR A LIST OF WAYPOINTS
-# ─────────────────────────────────────────────
-def get_elevation_profile(waypoints: list) -> list:
+def get_elevation_profile(waypoints: list, max_retries: int = 3) -> tuple:
     """
     waypoints: list of (lat, lon) tuples
-    Returns: list of elevation values in meters (one per waypoint)
-
-    Uses Open-Elevation API (free, no API key, no rate limit for
-    reasonable use). Falls back to a simulated terrain profile if
-    the API is unreachable (no internet, API down, etc).
+    Returns: (elevations, source) where source is "LIVE" or "SIMULATED"
     """
-    try:
-        locations = "|".join(f"{lat},{lon}" for lat, lon in waypoints)
-        url = f"https://api.open-elevation.com/api/v1/lookup?locations={locations}"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        elevations = [round(r["elevation"], 1) for r in data["results"]]
-        return elevations
-    except Exception:
-        return _simulate_elevation_profile(waypoints)
+    url = "https://api.open-elevation.com/api/v1/lookup"
+    payload = {
+        "locations": [{"latitude": lat, "longitude": lon} for lat, lon in waypoints]
+    }
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, json=payload, timeout=20)
+            response.raise_for_status()
+            data = response.json()
+            elevations = [round(r["elevation"], 1) for r in data["results"]]
+            if len(elevations) != len(waypoints):
+                raise ValueError(
+                    f"API returned {len(elevations)} elevations for "
+                    f"{len(waypoints)} waypoints - mismatched response"
+                )
+            return elevations, "LIVE"
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+
+    print(f"[terrain.py] Elevation API failed after {max_retries} attempts: {last_error}")
+    return _simulate_elevation_profile(waypoints), "SIMULATED"
 
 
 def _simulate_elevation_profile(waypoints: list) -> list:
     """
-    Fallback: generate a realistic-looking terrain profile when the
-    elevation API is unreachable. Uses a smooth random walk so hills
-    look natural instead of jumping randomly waypoint to waypoint.
+    Fallback ONLY - used when the real API is genuinely unreachable.
+    Clearly labeled SIMULATED by get_elevation_profile() above.
     """
     seed = int(abs(waypoints[0][0] * 1000) + abs(waypoints[0][1] * 1000)) % 99999
     rng = random.Random(seed)
 
-    base = rng.uniform(100, 800)  # base elevation for this region
+    base = rng.uniform(100, 800)
     elevations = [base]
     for _ in range(len(waypoints) - 1):
         step = rng.uniform(-40, 40)
@@ -52,20 +61,9 @@ def _simulate_elevation_profile(waypoints: list) -> list:
     return elevations
 
 
-# ─────────────────────────────────────────────
-# CHECK TERRAIN COLLISION RISK
-# ─────────────────────────────────────────────
 def check_terrain_clearance(waypoints: list, elevations: list,
                              planned_altitude_m: float,
                              min_safe_clearance_m: float = 30.0) -> list:
-    """
-    For each waypoint, check if the drone's altitude (measured above
-    the STARTING point's elevation, which is how "altitude" is usually
-    set by an operator) gives safe clearance above that waypoint's
-    actual ground elevation.
-
-    Returns a list of dicts, one per waypoint, with clearance info.
-    """
     if not elevations:
         return []
 
@@ -73,12 +71,8 @@ def check_terrain_clearance(waypoints: list, elevations: list,
     results = []
 
     for i, (wp, ground_elev) in enumerate(zip(waypoints, elevations)):
-        # Drone's actual height above sea level at this point
         drone_absolute_alt = start_elevation + planned_altitude_m
-
-        # How much clearance does the drone have above THIS terrain point
         clearance = drone_absolute_alt - ground_elev
-
         is_risk = clearance < min_safe_clearance_m
         is_collision = clearance < 0
 
@@ -100,10 +94,6 @@ def check_terrain_clearance(waypoints: list, elevations: list,
 
 
 def get_terrain_alerts(clearance_data: list) -> list:
-    """
-    Convert terrain clearance results into human-readable alert strings,
-    matching the style of your existing alert system.
-    """
     alerts = []
     for c in clearance_data:
         if c["is_collision"]:
@@ -129,7 +119,6 @@ def get_terrain_alerts(clearance_data: list) -> list:
 
 
 def get_max_terrain_risk_summary(clearance_data: list) -> dict:
-    """Summary stats for the whole route's terrain profile."""
     if not clearance_data:
         return {"min_clearance": None, "collision_count": 0,
                 "risk_count": 0, "worst_waypoint": None}

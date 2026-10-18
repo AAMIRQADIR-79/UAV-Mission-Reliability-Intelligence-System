@@ -36,6 +36,14 @@ from utils.terrain import (get_elevation_profile, check_terrain_clearance,
 from utils.rth import full_contingency_check, check_rth_feasibility
 from utils.gps_resilience import simulate_gps_event, dead_reckoning_estimate, gps_risk_penalty, get_gps_alert
 from utils.swarm import check_swarm_conflicts, conflict_to_alert
+from utils.ui_theme import (theme_css, topbar_html, mp_header, waypoint_table_html,
+                            hud_page, dials_page)
+from utils.place_search import search_places, looks_like_coords, STATUS as SEARCH_STATUS
+try:
+    from streamlit_searchbox import st_searchbox
+    SEARCH_OK = True
+except Exception:
+    SEARCH_OK = False
 try:
     import folium
     from streamlit_folium import st_folium
@@ -43,200 +51,109 @@ try:
 except Exception:
     FOLIUM_OK = False
 
+# ------------------------------------------------------------
+# place search box (type "ban" and get a list of places, like a maps app)
+# ------------------------------------------------------------
+SEARCHBOX_STYLE = {
+    "searchbox": {
+        "control": {"backgroundColor": "#1b1e22", "borderColor": "#464c54", "color": "#e6e8ea",
+                    "minHeight": 40},
+        "singleValue": {"color": "#e6e8ea"},
+        "input": {"color": "#e6e8ea"},
+        "placeholder": {"color": "#8a939c"},
+        "menuList": {"backgroundColor": "#23262a"},
+        "option": {"color": "#e6e8ea", "backgroundColor": "#23262a", "highlightColor": "#33401a"},
+    },
+    "dropdown": {"fill": "#9ac329"},
+    "clear": {"fill": "#9aa3ad"},
+}
+
+
+SEARCH_RADIUS_KM = 100   # this system is built for missions up to 100 km
+
+
+def _search_box_core(key, bias, radius, scope):
+    def _search(q):
+        centre = bias
+        if key == "dst_search":       # destination suggestions are centred on the chosen source
+            picked = str((st.session_state.get("src_search") or {}).get("result") or "")
+            if looks_like_coords(picked):
+                centre = tuple(float(v) for v in picked.split(","))
+        hits = search_places(q, bias=centre, radius_km=radius)
+        st.session_state[key + "_status"] = dict(SEARCH_STATUS)
+        return hits
+
+    st_searchbox(_search,
+                 debounce=300,
+                 placeholder="Type a city, village or area (e.g. ban...)",
+                 key=key, default_use_searchterm=True,
+                 rerun_scope=scope, style_overrides=SEARCHBOX_STYLE)
+    _s = st.session_state.get(key + "_status") or {"query": ""}
+    if _s["query"]:
+        if _s["note"]:
+            st.caption(_s["note"])
+        elif _s["sources"] == ["offline list"]:
+            st.caption(f'{_s["n"]} from the built-in offline list '
+                       '(online place search not reachable from this computer)')
+        else:
+            st.caption(f'{_s["n"]} suggestion{"" if _s["n"] == 1 else "s"} - '
+                       f'{" + ".join(_s["sources"]) or "none found"}')
+
+
+if SEARCH_OK and hasattr(st, "fragment"):
+    @st.fragment
+    def _search_box(key, bias, radius):
+        # only this box re-runs while typing, so the rest of the page stays still
+        _search_box_core(key, bias, radius, "fragment")
+else:
+    def _search_box(key, bias, radius):
+        _search_box_core(key, bias, radius, "app")
+
+
+def place_box(key, bias=None, radius=None):
+    """
+    Returns (text, mode) for the analysis step.
+    Picked suggestion -> ("lat, lon", "GPS Coordinates").
+    Typed but not picked -> (typed text, "Name / Village / City").
+    """
+    if not SEARCH_OK:
+        st.warning("Suggestion box not available. Run: python -m pip install streamlit-searchbox "
+                   "(using a plain text box for now)")
+        txt = st.text_input("Place", key=key + "_txt", placeholder="City, village or area")
+        return txt, "Name / Village / City"
+    _search_box(key, bias, radius)
+    res = str((st.session_state.get(key) or {}).get("result") or "").strip()
+    if looks_like_coords(res):
+        return res, "GPS Coordinates"
+    return res, "Name / Village / City"
+
+
+def resolve_place(text):
+    """Name -> (lat, lon). Uses the project geocoder first, then the suggestion search."""
+    try:
+        return geocode_place(text)
+    except Exception:
+        hits = search_places(text, limit=1)
+        if hits:
+            return parse_coordinates(hits[0][1])
+        raise
+
+
+def html_frame(html, height):
+    """Embed a small HTML page. Uses st.iframe on new Streamlit, components.html on older ones."""
+    if hasattr(st, "iframe"):
+        st.iframe(html, height=max(int(height), 1))
+    else:
+        components.html(html, height=height)
+
 st.set_page_config(page_title="UAV Ground Control Station",
                     page_icon="🛸", layout="wide",
                     initial_sidebar_state="collapsed")
 
 # ============================================================
-# CSS  —  Mission-Planner-inspired look (dark toolbar + readable body)
+# THEME  (dark ground-control look, see utils/ui_theme.py)
 # ============================================================
-st.markdown("""
-<style>
-html, body, [class*="css"] { font-family: "Segoe UI", Arial, sans-serif; }
-/* Force browser to always use LIGHT native form-control styling,
-   regardless of OS/browser dark mode - this is what was making the
-   Mission Type dropdown and other native controls render dark-on-dark */
-html { color-scheme: light !important; }
-
-/* ---- Global readable text everywhere, explicitly excluding
-   anything inside the tab bar so it can never fight tab colors ---- */
-label:not(:is(.stTabs *)),
-.stSlider label, .stSelectbox label, .stRadio label, .stTextInput label,
-.stCheckbox label span {
-    color:#1a1a1a !important;
-}
-[data-testid="stMarkdownContainer"]:not(:is(.stTabs *)) p,
-[data-testid="stMarkdownContainer"]:not(:is(.stTabs *)) li {
-    color:#1a1a1a !important;
-}
-[data-testid="stAlert"] p, [data-testid="stAlert"] div, [data-testid="stAlert"] span {
-    color:#0e3d0e !important;
-}
-.stSlider [data-testid="stTickBar"] { color:#1a1a1a !important; }
-.stSlider span { color:#1a1a1a !important; }
-div[data-baseweb="select"] > div { color:#1a1a1a !important; }
-.stRadio div[role="radiogroup"] label { color:#1a1a1a !important; }
-
-.stApp { background:#6b6b47; }
-#MainMenu, footer, header {visibility:hidden;}
-[data-testid="collapsedControl"]{display:none;}
-[data-testid="stSidebar"]{display:none;}
-[data-testid="stStatusWidget"] { display:none !important; }
-.stApp > header { background:transparent !important; height:0px !important; }
-
-/* ---- Dark Mission-Planner-style top toolbar ---- */
-.topbar{
-    background:#12161c;border-bottom:2px solid #3fa33f;
-    padding:10px 16px;display:flex;justify-content:space-between;
-    align-items:center;
-}
-.topbar-title{font-size:16px;font-weight:700;color:#eef2f6;letter-spacing:1px;}
-.topbar-title span{color:#5fbf5f;}
-
-/* ---- Tabs styled like a toolbar icon bar ---- */
-.stTabs [data-baseweb="tab-list"]{background:#1a1f26;border-bottom:2px solid #3fa33f;gap:0;}
-.stTabs [data-baseweb="tab"]{
-    background:#1a1f26;color:#c7ccd3 !important;border:1px solid #2a2f37;border-bottom:none;
-    border-radius:4px 4px 0 0;font-size:12px;font-weight:700;letter-spacing:.3px;
-    padding:10px 18px;margin-right:2px;}
-.stTabs [data-baseweb="tab"] p,
-.stTabs [data-baseweb="tab"] div,
-.stTabs [data-baseweb="tab"] span {
-    color:#c7ccd3 !important;
-}
-.stTabs [aria-selected="true"]{background:#232a33;color:#7fd97f !important;border-bottom:2px solid #3fa33f;}
-.stTabs [aria-selected="true"] p,
-.stTabs [aria-selected="true"] div,
-.stTabs [aria-selected="true"] span {
-    color:#7fd97f !important;
-}
-
-/* ---- Slider min/max/value labels: bulletproof fix ---- */
-/* Forces every descendant text node inside any slider to be dark and
-   readable, regardless of Streamlit version / internal testid naming */
-.stSlider, .stSlider * {
-    color:#1a1a1a !important;
-}
-.stSlider [role="slider"] {
-    background-color:#3fa33f !important;
-    border-color:#2c7a2c !important;
-}
-[data-testid="stTickBarMin"], [data-testid="stTickBarMax"],
-[data-testid="stTickBar"] p, [data-testid="stTickBar"] div,
-[data-testid="stThumbValue"], [data-testid="stThumbValue"] div,
-.stSlider [data-testid="stMarkdownContainer"] p {
-    color:#1a1a1a !important;
-    font-weight:700 !important;
-}
-
-/* ---- Radio / checkbox text: same bulletproof approach ---- */
-.stRadio *, .stCheckbox * {
-    color:#1a1a1a !important;
-}
-
-/* ---- Military panel styling for cards sitting on the olive bg ---- */
-.action-box, .gcard, .metric {
-    box-shadow: 0 1px 3px rgba(0,0,0,0.35);
-}
-
-/* ---- Force light, readable native form controls ---- */
-.stTextInput input,
-.stSelectbox div[data-baseweb="select"] > div,
-.stNumberInput input {
-    background:#ffffff !important;
-    color:#1a1a1a !important;
-    border:1px solid #b7b7b7 !important;
-}
-div[data-baseweb="popover"] { background:#ffffff !important; }
-div[data-baseweb="popover"] li,
-div[data-baseweb="menu"] li,
-ul[role="listbox"] li {
-    background:#ffffff !important;
-    color:#1a1a1a !important;
-}
-
-/* ---- Bulletproof readable text inside cards / raw HTML markdown blocks,
-   while leaving the intentionally-colored alert boxes untouched and
-   explicitly excluding the tab bar. ---- */
-.gcard *:not(.al-crit):not(.al-warn):not(.al-caut):not(.al-ok),
-[data-testid="stMarkdownContainer"] *:not(.al-crit):not(.al-warn):not(.al-caut):not(.al-ok):not(:is(.stTabs *)):not(:is(.topbar *)) {
-    color:#1a1a1a !important;
-}
-
-.gcard{background:#ffffff;border:1px solid #c3c3c3;border-radius:4px;padding:10px;margin-bottom:8px;color:#1a1a1a !important;}
-.gcard-hdr{background:#dfe9d4;border:1px solid #a9c48a;border-radius:3px;
-    padding:5px 10px;font-weight:700;font-size:12px;color:#375222;margin-bottom:8px;}
-
-.metric{background:#f7f7f7;border:1px solid #cfcfcf;border-radius:3px;
-    padding:8px;text-align:center;}
-.metric-val{font-size:16px;font-weight:700;}
-.metric-lbl{font-size:9.5px;color:#777;text-transform:uppercase;letter-spacing:.5px;}
-
-.status-banner{border-radius:4px;padding:9px 16px;font-size:14px;font-weight:700;
-    text-align:center;letter-spacing:1px;}
-.status-safe{background:#e5f7e5;border:1px solid #3fa33f;color:#1f7a1f;}
-.status-mod{background:#fff6e0;border:1px solid #d69f00;color:#8a6d00;}
-.status-high{background:#ffe9d8;border:1px solid #d9752c;color:#a5471a;}
-.status-crit{background:#fde0e0;border:1px solid #c23b3b;color:#a52020;}
-
-.al-crit{background:#fde0e0;border-left:4px solid #c23b3b;color:#7a1f1f;
-    padding:6px 10px;margin:3px 0;font-size:11.5px;border-radius:2px;}
-.al-warn{background:#fff3d6;border-left:4px solid #d69f00;color:#6b5300;
-    padding:6px 10px;margin:3px 0;font-size:11.5px;border-radius:2px;}
-.al-caut{background:#e4f0fa;border-left:4px solid #2f7fbf;color:#1c4d73;
-    padding:6px 10px;margin:3px 0;font-size:11.5px;border-radius:2px;}
-.al-ok{background:#e5f7e5;border-left:4px solid #3fa33f;color:#1f5c1f;
-    padding:6px 10px;margin:3px 0;font-size:11.5px;border-radius:2px;}
-
-.action-box{background:#f2f2f2;border:1px solid #b7b7b7;border-radius:4px;padding:10px;}
-.action-hdr{background:#dfe9d4;padding:4px 8px;font-weight:700;font-size:12px;
-    color:#375222;border-radius:3px;margin-bottom:8px;}
-.geo-line{font-family:"Consolas",monospace;font-size:12px;color:#1a5fb4;
-    background:#eef3fa;border:1px solid #b6cbe6;padding:5px 8px;border-radius:3px;margin-bottom:6px;}
-
-.sitrep{background:#f7f7f7;border:1px solid #c3c3c3;border-radius:3px;
-    padding:10px;font-family:"Consolas",monospace;font-size:11.5px;color:#1a3a1a;
-    line-height:1.7;white-space:pre-wrap;}
-
-.stButton>button{background:#dfe9d4;border:1px solid #8fae6a;color:#2c4218;
-    font-weight:600;font-size:12px;border-radius:3px;}
-.stButton>button:hover{background:#c9dab0;border-color:#6f9146;}
-.stButton>button[kind="primary"]{background:#2f7fbf;border-color:#1a5fb4;color:#ffffff;}
-.stButton>button[kind="primary"]:hover{background:#1a5fb4;}
-
-.wp-header{background:#dfe9d4;border:1px solid #a9c48a;border-radius:3px 3px 0 0;
-    padding:6px 12px;font-weight:700;font-size:13px;color:#375222;}
-
-/* ---- FINAL OVERRIDE: tab label text must stay light (placed last
-   so it wins over the earlier wildcard markdown-darkening rule,
-   since Streamlit renders tab labels through a markdown container
-   internally too) ---- */
-.stTabs [data-baseweb="tab-list"] [data-testid="stMarkdownContainer"],
-.stTabs [data-baseweb="tab-list"] [data-testid="stMarkdownContainer"] *,
-.stTabs [data-baseweb="tab"] [data-testid="stMarkdownContainer"],
-.stTabs [data-baseweb="tab"] [data-testid="stMarkdownContainer"] *,
-.stTabs [data-baseweb="tab"] p,
-.stTabs [data-baseweb="tab"] div,
-.stTabs [data-baseweb="tab"] span {
-    color:#c7ccd3 !important;
-}
-.stTabs [aria-selected="true"] [data-testid="stMarkdownContainer"],
-.stTabs [aria-selected="true"] [data-testid="stMarkdownContainer"] *,
-.stTabs [aria-selected="true"] p,
-.stTabs [aria-selected="true"] div,
-.stTabs [aria-selected="true"] span {
-    color:#7fd97f !important;
-}
-
-/* ---- FINAL OVERRIDE: header title + live clock must stay light,
-   placed last with high-specificity selectors so nothing else can
-   accidentally darken them ---- */
-.topbar .topbar-title { color:#eef2f6 !important; }
-.topbar .topbar-title span { color:#5fbf5f !important; }
-#live-clock { color:#7fd97f !important; }
-#live-date { color:#9aa3ad !important; }
-</style>
-""", unsafe_allow_html=True)
+st.markdown(theme_css(), unsafe_allow_html=True)
 
 # ============================================================
 # helper functions
@@ -413,42 +330,67 @@ def draw_curves(history, title):
     return fig_png(fig)
 
 
-def build_map(src, dst, wps, nfz_list, nfz_conf, tlog=None):
-    cx, cy = (src[0]+dst[0])/2, (src[1]+dst[1])/2
-    m = folium.Map(location=[cx, cy], zoom_start=9, tiles="OpenStreetMap")
-    folium.PolyLine([[w[0], w[1]] for w in wps], color="#ffcc00", weight=3,
-                     opacity=0.9).add_to(m)
+def build_map(src, dst, wps, nfz_list, nfz_conf, tlog=None, info=None, height_px=520):
+    """Satellite map, yellow route, numbered waypoint badges, home marker, NFZ circles."""
+    m = folium.Map(location=[(src[0]+dst[0])/2, (src[1]+dst[1])/2], zoom_start=12,
+                   tiles=None, control_scale=True)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Imagery (c) Esri, Maxar, Earthstar Geographics", name="Satellite", max_zoom=19).add_to(m)
+    folium.TileLayer("OpenStreetMap", name="Street map").add_to(m)
+
+    pts = [[w[0], w[1]] for w in wps]
+    if len(pts) >= 2:
+        folium.PolyLine(pts, color="#ffe000", weight=3, opacity=0.95).add_to(m)
+
     for i, wp in enumerate(wps):
         rs = tlog[i]["risk_score"] if tlog and i < len(tlog) else 0
-        col = "#c23b3b" if rs >= 60 else "#d69f00" if rs >= 35 else "#3fa33f"
-        folium.Marker([wp[0], wp[1]],
-                       icon=folium.Icon(color="green" if rs < 35 else
-                                        "orange" if rs < 60 else "red",
-                                        icon="flag", prefix="fa"),
-                       popup=folium.Popup(
-                           f"<b>WP{i+1:02d}</b><br>LAT:{wp[0]:.4f}<br>"
-                           f"LON:{wp[1]:.4f}<br>"
-                           f"GRID:{get_grid_reference(wp[0], wp[1])}"
-                           f"{'<br>RISK:'+str(rs)+'%' if tlog else ''}",
-                           max_width=180)).add_to(m)
+        pin = "#3fa33f" if rs < 35 else "#d69f00" if rs < 60 else "#c23b3b"
+        badge = ('<div style="position:relative;width:34px;height:40px">'
+                 f'<div style="position:absolute;left:11px;top:14px;width:12px;height:12px;border-radius:50%;'
+                 f'background:{pin};border:2px solid #fff;box-shadow:0 0 3px #000"></div>'
+                 f'<div style="position:absolute;left:0;top:-4px;min-width:34px;text-align:center;'
+                 f'background:#e8eef7;border:1px solid #6b7a90;border-radius:9px;color:#1c2a3a;'
+                 f'font:700 11px Segoe UI,Arial;padding:1px 0">{i+1}</div></div>')
+        folium.Marker([wp[0], wp[1]], icon=folium.DivIcon(html=badge, icon_size=(34, 40), icon_anchor=(17, 26)),
+                      popup=folium.Popup(
+                          f"<b>WP{i+1:02d}</b><br>LAT {wp[0]:.5f}<br>LON {wp[1]:.5f}<br>"
+                          f"GRID {get_grid_reference(wp[0], wp[1])}"
+                          f"{'<br>RISK ' + str(rs) + '%' if tlog else ''}", max_width=180)).add_to(m)
+
     for nfz in nfz_list:
-        col = ("#c23b3b" if nfz["severity"] == "prohibited" else
-               "#d69f00" if nfz["severity"] == "restricted" else "#1a5fb4")
-        folium.Circle([nfz["lat"], nfz["lon"]], radius=nfz["radius_km"]*1000,
-                       color=col, fill=True, fill_color=col, fill_opacity=0.12,
-                       weight=2, dash_array="8 4",
-                       popup=folium.Popup(
-                           f"<b>{nfz['id']}</b><br>{nfz['name']}<br>"
-                           f"SEV:{nfz['severity'].upper()}", max_width=170)).add_to(m)
+        col = ("#ff5a4d" if nfz["severity"] == "prohibited" else
+               "#f5b83d" if nfz["severity"] == "restricted" else "#5aa9ff")
+        folium.Circle([nfz["lat"], nfz["lon"]], radius=nfz["radius_km"]*1000, color=col, fill=True,
+                      fill_color=col, fill_opacity=0.18, weight=2, dash_array="8 4",
+                      popup=folium.Popup(f"<b>{nfz['id']}</b><br>{nfz['name']}<br>"
+                                         f"SEV {nfz['severity'].upper()}", max_width=170)).add_to(m)
+
     if tlog:
         lw = tlog[-1].get("position", dst)
-        folium.Marker([lw[0], lw[1]],
-                       icon=folium.Icon(color="blue", icon="plane", prefix="fa"),
-                       popup="UAV Current Position").add_to(m)
-    folium.Marker([src[0], src[1]], popup="SOURCE / HOME",
-                   icon=folium.Icon(color="darkgreen", icon="home", prefix="fa")).add_to(m)
-    folium.Marker([dst[0], dst[1]], popup="DESTINATION",
-                   icon=folium.Icon(color="darkred", icon="flag-checkered", prefix="fa")).add_to(m)
+        folium.Marker([lw[0], lw[1]], popup="UAV current position",
+                      icon=folium.Icon(color="blue", icon="plane", prefix="fa")).add_to(m)
+
+    home = ('<div style="background:#e8eef7;border:1px solid #6b7a90;border-radius:9px;color:#1c2a3a;'
+            'font:700 11px Segoe UI,Arial;padding:1px 9px;white-space:nowrap;display:inline-block">Home</div>')
+    folium.Marker([src[0], src[1]], popup="HOME / SOURCE",
+                  icon=folium.DivIcon(html=home, icon_size=(60, 22), icon_anchor=(30, -8))).add_to(m)
+    folium.CircleMarker([src[0], src[1]], radius=6, color="#fff", weight=2, fill=True,
+                        fill_color="#3fa33f", fill_opacity=1).add_to(m)
+    if (dst[0], dst[1]) != (src[0], src[1]):
+        folium.Marker([dst[0], dst[1]], popup="DESTINATION",
+                      icon=folium.Icon(color="darkred", icon="flag-checkered", prefix="fa")).add_to(m)
+
+    if info:
+        box = ('<div style="position:absolute;top:10px;left:56px;z-index:9999;background:rgba(14,16,18,.82);'
+               'color:#e6e8ea;font:12px Consolas,monospace;padding:6px 10px;border-left:3px solid #9ac329;'
+               'line-height:1.5">' + "<br>".join(info) + "</div>")
+        m.get_root().html.add_child(folium.Element(box))
+
+    if len(pts) >= 2:
+        m.fit_bounds([[min(p[0] for p in pts), min(p[1] for p in pts)],
+                      [max(p[0] for p in pts), max(p[1] for p in pts)]], padding=(40, 40))
+    folium.LayerControl(position="topright", collapsed=True).add_to(m)
     return m
 
 # ============================================================
@@ -497,22 +439,12 @@ now = datetime.datetime.now()
 ml_acc = st.session_state.ml_meta.get("accuracy", "-")
 
 # ============================================================
-# TOP BAR  (dark Mission-Planner style + live JS clock)
+# TOP BAR  (title, link status, live clock)
 # ============================================================
-conn_cls = "conn-box" if st.session_state.analysis_done else "conn-box bad"
-conn_txt = ("CONNECTED - " + str(st.session_state.mission_id)
-            if st.session_state.analysis_done else "NOT CONNECTED")
+st.markdown(topbar_html(st.session_state.mission_id, st.session_state.analysis_done),
+            unsafe_allow_html=True)
 
-st.markdown(
-    f'<div class="topbar">'
-    f'<div class="topbar-title">🛸 UAV <span>GROUND CONTROL STATION</span></div>'
-    f'<div id="live-clock-box" style="text-align:right;font-family:Consolas,monospace">'
-    f'<div id="live-clock" style="font-size:18px;color:#7fd97f;font-weight:700"></div>'
-    f'<div id="live-date" style="font-size:10px;color:#9aa3ad"></div>'
-    f'</div></div>',
-    unsafe_allow_html=True)
-
-components.html("""
+html_frame("""
 <script>
 function updateClock(){
   var now = new Date();
@@ -526,141 +458,154 @@ function updateClock(){
 updateClock();
 setInterval(updateClock, 1000);
 </script>
-""", height=0)
-
-conn_r1, conn_r2 = st.columns([4, 1])
-with conn_r2:
-    st.markdown(f'<div style="text-align:right;margin-top:-10px">'
-               f'<span class="conn-box {"" if st.session_state.analysis_done else "bad"}" '
-               f'style="background:{"#eaffea" if st.session_state.analysis_done else "#ffeaea"};'
-               f'border:1px solid {"#3fa33f" if st.session_state.analysis_done else "#c23b3b"};'
-               f'border-radius:4px;padding:4px 12px;font-size:11px;'
-               f'color:{"#1f7a1f" if st.session_state.analysis_done else "#a52020"};'
-               f'font-weight:600">{conn_txt}</span></div>', unsafe_allow_html=True)
-
-st.markdown("<hr style='margin:4px 0 10px 0;border-color:#c3c3c3'>",
-            unsafe_allow_html=True)
+""", 0)
 
 # ============================================================
-# TABS
+# TABS  (icons are drawn by the theme CSS)
 # ============================================================
-tabs = st.tabs(["📊 FLIGHT PLAN", "📈 FLIGHT DATA", "🌤️ WEATHER", "🚫 NFZ STATUS",
-                "🤖 AI ANALYSIS", "▶ SIMULATION", "🧠 DEEP LEARNING", "📋 REPORT",
-                "⛰️ TERRAIN & RTH", "🛰️ SWARM"])
+tabs = st.tabs(["FLIGHT PLAN", "FLIGHT DATA", "WEATHER", "NFZ STATUS",
+                "AI ANALYSIS", "SIMULATION", "DEEP LEARNING", "REPORT",
+                "TERRAIN & RTH", "SWARM"])
 
 # ------------------------------------------------------------
-# TAB 0 - FLIGHT PLAN  (main Mission-Planner-style screen)
+# TAB 0 - FLIGHT PLAN  (map + action panel + waypoint table)
 # ------------------------------------------------------------
 with tabs[0]:
-    map_col, action_col = st.columns([3, 1])
+    map_col, action_col = st.columns([3.2, 1.1], gap="small")
 
     with action_col:
-        st.markdown('<div class="action-box">', unsafe_allow_html=True)
-        st.markdown('<div class="action-hdr">MISSION PARAMETERS</div>',
-                    unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown(mp_header("Mission parameters"), unsafe_allow_html=True)
 
-        st.markdown("**Source (Auto-Detected via GPS)**")
-        location = get_geolocation()
+            near_only = st.checkbox(f"Only suggest places within {SEARCH_RADIUS_KM} km of me",
+                                    value=True, key="near_only")
+            _radius = SEARCH_RADIUS_KM if near_only else None
 
-        if location and "coords" in location:
-            auto_lat = location["coords"]["latitude"]
-            auto_lon = location["coords"]["longitude"]
-            accuracy = location["coords"].get("accuracy", 0)
+            st.markdown("**Source (auto-detected via GPS)**")
+            location = get_geolocation()
+            _bias = None
+            if location and "coords" in location:
+                _bias = (location["coords"]["latitude"], location["coords"]["longitude"])
 
-            src_input = f"{auto_lat}, {auto_lon}"
-            src_mode = "GPS Coordinates"
+            if location and "coords" in location:
+                auto_lat = location["coords"]["latitude"]
+                auto_lon = location["coords"]["longitude"]
+                accuracy = location["coords"].get("accuracy", 0)
 
-            st.success(f"Location locked: {auto_lat:.5f}, {auto_lon:.5f} "
-                       f"(±{accuracy:.0f}m)")
+                src_input = f"{auto_lat}, {auto_lon}"
+                src_mode = "GPS Coordinates"
 
-            use_manual_src = st.checkbox("Override with manual source instead")
-            if use_manual_src:
-                src_input = st.text_input("Manual Source", value="Srinagar, Kashmir")
-                src_mode = "Name / Village / City"
-        else:
-            st.warning("Waiting for GPS permission — click 'Allow' in your "
-                       "browser's location popup")
-            src_input = st.text_input("Source (manual entry)", value="Srinagar, Kashmir")
-            src_mode = "Name / Village / City"
+                st.success(f"Location locked: {auto_lat:.5f}, {auto_lon:.5f} "
+                           f"(+/-{accuracy:.0f} m)")
 
-        st.markdown("**Destination**")
-        dst_mode = st.radio("Destination input mode",
-                            ["Name / Village / City", "GPS Coordinates"],
-                            label_visibility="collapsed", key="dst_mode_radio")
-        if dst_mode == "Name / Village / City":
-            dst_input = st.text_input("Destination", value="Gulmarg, Kashmir",
-                                      placeholder="Any city, village, area...")
-        else:
-            dst_input = st.text_input("Destination (lat, lon)", value="34.0493, 74.3800")
+                use_manual_src = st.checkbox("Override with manual source instead")
+                if use_manual_src:
+                    st.markdown("Manual source")
+                    src_input, src_mode = place_box("src_search", _bias, _radius)
+            else:
+                st.warning("Waiting for GPS permission. Click 'Allow' in your "
+                           "browser's location popup.")
+                st.markdown("Source")
+                src_input, src_mode = place_box("src_search", _bias, _radius)
 
-        mission_type = st.selectbox("Mission type", MISSION_TYPES)
-        n_wps = st.slider("Waypoints", 6, 20, 12)
+            st.markdown("**Destination**")
+            dst_mode = st.radio("Destination input mode",
+                                ["Name / Village / City", "GPS Coordinates"],
+                                label_visibility="collapsed", key="dst_mode_radio")
+            if dst_mode == "Name / Village / City":
+                # destination suggestions are centred on the source (picked place or GPS fix)
+                _home_xy = _bias
+                if looks_like_coords(str(src_input)):
+                    _la, _lo = [float(v) for v in str(src_input).split(",")]
+                    _home_xy = (_la, _lo)
+                dst_input, dst_mode = place_box("dst_search", _home_xy, _radius)
+            else:
+                dst_input = st.text_input("Destination (lat, lon)", value="34.0493, 74.3800")
 
-        st.markdown("---")
-        battery  = st.slider("Battery (%)", 10, 100, 85)
-        payload  = st.slider("Payload (kg)", 0.0, 5.0, 1.5, step=0.1)
-        signal   = st.slider("Signal (%)", 10, 100, 78)
-        altitude = st.slider("Altitude (m)", 20, 400, 120, step=10)
+            mission_type = st.selectbox("Mission type", MISSION_TYPES)
+            n_wps = st.slider("Waypoints", 6, 20, 12)
 
-        st.markdown("---")
-        analyse_btn  = st.button("ANALYSE MISSION", type="primary",
-                                  use_container_width=True)
-        simulate_btn = st.button("RUN SIMULATION", type="primary",
-                                  use_container_width=True,
-                                  disabled=not st.session_state.analysis_done)
-        if st.button("ABORT / RTH", use_container_width=True):
-            st.error("ABORT ISSUED - RETURN TO HOME ACTIVE")
-        st.markdown('</div>', unsafe_allow_html=True)
+            battery  = st.slider("Battery (%)", 10, 100, 85)
+            payload  = st.slider("Payload (kg)", 0.0, 5.0, 1.5, step=0.1)
+            signal   = st.slider("Signal (%)", 10, 100, 78)
+            altitude = st.slider("Altitude (m)", 20, 400, 120, step=10)
+
+            analyse_btn  = st.button("ANALYSE MISSION", type="primary",
+                                      use_container_width=True)
+            simulate_btn = st.button("RUN SIMULATION", type="primary",
+                                      use_container_width=True,
+                                      disabled=not st.session_state.analysis_done)
+            if st.button("ABORT / RTH", use_container_width=True):
+                st.error("ABORT ISSUED - RETURN TO HOME ACTIVE")
 
         if st.session_state.analysis_done:
-            src = st.session_state.src_coords
-            dst = st.session_state.dst_coords
+            _s = st.session_state.src_coords
+            _d = st.session_state.dst_coords
             st.markdown(
-                f'<div class="geo-line">SRC {src[0]:.5f}, {src[1]:.5f}</div>'
-                f'<div class="geo-line">DST {dst[0]:.5f}, {dst[1]:.5f}</div>',
+                f'<div class="geo-line">HOME {_s[0]:.5f}, {_s[1]:.5f}</div>'
+                f'<div class="geo-line">DEST {_d[0]:.5f}, {_d[1]:.5f}</div>',
                 unsafe_allow_html=True)
 
     with map_col:
-        if st.session_state.analysis_done:
-            wps = st.session_state.waypoints
-            src = st.session_state.src_coords
-            dst = st.session_state.dst_coords
-            nfz_list = st.session_state.nfz_list
-            nfz_conf = st.session_state.nfz_conflicts
-            tlog = st.session_state.telemetry_log
-            if FOLIUM_OK:
-                fmap = build_map(src, dst, wps, nfz_list, nfz_conf, tlog or None)
-                st_folium(fmap, width=None, height=430, returned_objects=[])
-            st.markdown(
-                f'<div style="font-size:11.5px;color:#555;margin-top:4px">'
-                f'Distance: {st.session_state.distance_km:.2f} km | '
-                f'Bearing: {st.session_state.bearing:.0f} deg {st.session_state.compass}'
-                f' | Waypoints: {len(wps)} | '
-                f'NFZ zones: {len(nfz_list)}</div>', unsafe_allow_html=True)
+        if FOLIUM_OK:
+            if st.session_state.analysis_done:
+                _wps = st.session_state.waypoints
+                _src = st.session_state.src_coords
+                _dst = st.session_state.dst_coords
+                _info = [f"Distance: {st.session_state.distance_km:.2f} km",
+                         f"Bearing: {st.session_state.bearing:.0f} deg {st.session_state.compass}",
+                         f"Waypoints: {len(_wps)}   NFZ zones: {len(st.session_state.nfz_list)}"]
+                fmap = build_map(_src, _dst, _wps, st.session_state.nfz_list,
+                                 st.session_state.nfz_conflicts,
+                                 st.session_state.telemetry_log or None, info=_info)
+            else:
+                # before analysis: show the home position (GPS fix if we have one) at street level
+                if location and "coords" in location:
+                    _home = (location["coords"]["latitude"], location["coords"]["longitude"])
+                    _txt = "Home = your GPS position"
+                else:
+                    _home = (12.9716, 77.5946)
+                    _txt = "Waiting for GPS (showing default area)"
+                fmap = build_map(_home, _home, [], [], [], None,
+                                 info=[_txt, "Enter a destination and press ANALYSE MISSION"])
+                fmap.location = list(_home)
+                fmap.options["zoom"] = 13
+            st_folium(fmap, width=None, height=520, returned_objects=[], key="plan_map")
         else:
-            st.info("Confirm source (auto-detected or manual), enter a destination, "
-                    "then click ANALYSE MISSION to plot the route.")
+            st.info("Map library not installed. Run: pip install folium streamlit-folium")
 
-    if st.session_state.analysis_done:
-        st.markdown('<div class="wp-header">WAYPOINTS</div>', unsafe_allow_html=True)
-        wps = st.session_state.waypoints
-        feats = st.session_state.features
-        rows = []
-        for i, wp in enumerate(wps):
-            frac = i / max(len(wps)-1, 1)
-            bt = max(0, feats["battery_pct"] - frac*feats["battery_pct"]*0.65)
-            sect = ("ALPHA" if frac < 0.25 else "BRAVO" if frac < 0.5
-                    else "CHARLIE" if frac < 0.75 else "DELTA")
-            rows.append({"WP": i+1, "Command": "WAYPOINT",
-                         "Lat": round(wp[0], 6), "Long": round(wp[1], 6),
-                         "Alt": altitude, "Battery %": round(bt, 1),
-                         "Sector": sect, "Grid Ref": get_grid_reference(wp[0], wp[1])})
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        if st.session_state.analysis_done:
+            _wps = st.session_state.waypoints
+            _feats = st.session_state.features
+            _rows = []
+            for i, wp in enumerate(_wps):
+                frac = i / max(len(_wps)-1, 1)
+                bt = max(0, _feats["battery_pct"] - frac*_feats["battery_pct"]*0.65)
+                sect = ("ALPHA" if frac < 0.25 else "BRAVO" if frac < 0.5
+                        else "CHARLIE" if frac < 0.75 else "DELTA")
+                if i == 0:
+                    seg_km, az = 0.0, 0
+                else:
+                    p = _wps[i-1]
+                    seg_km = haversine_distance(p[0], p[1], wp[0], wp[1])
+                    az = get_bearing(p[0], p[1], wp[0], wp[1])
+                _rows.append({"#": i+1, "Command": "TAKEOFF" if i == 0 else "WAYPOINT",
+                              "Lat": f"{wp[0]:.6f}", "Long": f"{wp[1]:.6f}", "Alt (m)": altitude,
+                              "Dist (km)": f"{seg_km:.2f}", "AZ": f"{az:.0f}",
+                              "Battery %": f"{bt:.1f}", "Sector": sect,
+                              "Grid ref": get_grid_reference(wp[0], wp[1])})
+            st.markdown(waypoint_table_html(
+                _rows, ["#", "Command", "Lat", "Long", "Alt (m)", "Dist (km)", "AZ",
+                        "Battery %", "Sector", "Grid ref"]), unsafe_allow_html=True)
+
 
 # ============================================================
 # ANALYSIS HANDLER
 # ============================================================
 if analyse_btn:
+    if not str(src_input).strip() or not str(dst_input).strip():
+        st.error("Please type a source and a destination, then pick one of the suggestions.")
+        st.stop()
     st.session_state.analysis_done = False
     st.session_state.sim_done = False
     st.session_state.telemetry_log = []
@@ -670,12 +615,12 @@ if analyse_btn:
     prog = st.progress(0, text="Resolving locations...")
     try:
         if src_mode == "Name / Village / City":
-            slat, slon = geocode_place(src_input)
+            slat, slon = resolve_place(src_input)
         else:
             slat, slon = parse_coordinates(src_input)
 
         if dst_mode == "Name / Village / City":
-            dlat, dlon = geocode_place(dst_input)
+            dlat, dlon = resolve_place(dst_input)
         else:
             dlat, dlon = parse_coordinates(dst_input)
 
@@ -797,6 +742,40 @@ if st.session_state.analysis_done:
     dl = st.session_state.dl_models
 
     with tabs[1]:
+        # ---- instrument row: horizon display (left) + live map (right) ----
+        _speed_ms = (dist_km / max(ft["flight_time_min"], 0.1)) * 1000.0 / 60.0
+        _armed = bool(st.session_state.sim_running or tlog)
+        h_col, m_col = st.columns([1, 1.25], gap="small")
+        with h_col:
+            html_frame(
+                hud_page(heading_deg=st.session_state.bearing, altitude_m=feats["altitude_m"],
+                         speed_ms=_speed_ms, battery_pct=feats["battery_pct"],
+                         signal_pct=feats["signal_strength_pct"], armed=_armed,
+                         mode="AUTO" if _armed else "STANDBY", simulated=True,
+                         risk_pct=pred["risk_score"], alt_limit=400),
+                440)
+        with m_col:
+            if FOLIUM_OK:
+                _info = [f"Distance: {dist_km:.2f} km",
+                         f"Bearing: {st.session_state.bearing:.0f} deg {st.session_state.compass}"]
+                st_folium(build_map(src, dst, wps, nfz_list, nfz_conf, tlog or None, info=_info),
+                          width=None, height=440, returned_objects=[], key="flight_data_map")
+
+        # ---- dials ----
+        html_frame(dials_page([
+            dict(value=_speed_ms, vmin=0, vmax=30, label="Speed", unit="m/s"),
+            dict(value=feats["altitude_m"], vmin=0, vmax=400, label="Altitude", unit="m AGL",
+                 good_below=300, bad_above=380),
+            dict(value=feats["battery_pct"], vmin=0, vmax=100, label="Battery", unit="%",
+                 low_is_bad=True, low_warn=35, low_bad=20),
+            dict(value=feats["signal_strength_pct"], vmin=0, vmax=100, label="Link", unit="%",
+                 low_is_bad=True, low_warn=35, low_bad=20),
+            dict(value=feats["wind_speed_mps"], vmin=0, vmax=25, label="Wind", unit="m/s",
+                 good_below=8, bad_above=15, fmt="{:.1f}"),
+            dict(value=pred["risk_score"], vmin=0, vmax=100, label="Risk", unit="%",
+                 good_below=35, bad_above=60),
+        ]), 170)
+
         st.markdown(status_html(pred), unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
         c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -806,7 +785,7 @@ if st.session_state.analysis_done:
              "#3fa33f" if feats["battery_pct"] > 40 else "#c23b3b"),
             (f"{feats['wind_speed_mps']:.1f} m/s", "Wind",
              "#d69f00" if feats["wind_speed_mps"] > 8 else "#3fa33f"),
-            (f"{feats['payload_kg']:.1f} kg", "Payload", "#444"),
+            (f"{feats['payload_kg']:.1f} kg", "Payload", "#c9d1d6"),
             (f"{feats['signal_strength_pct']:.0f}%", "Signal",
              "#c23b3b" if feats["signal_strength_pct"] < 35 else "#1a5fb4"),
             (f"{ft['flight_time_min']:.0f} min", "ETA", "#1a5fb4"),
@@ -1119,7 +1098,7 @@ if st.session_state.analysis_done:
             summ["Final Battery"] = f"{tlog[-1]['battery']:.1f}%"
             summ["Peak Risk"] = f"{max(t['risk_score'] for t in tlog):.1f}%"
 
-        st.dataframe(pd.DataFrame(list(summ.items()), columns=["Parameter", "Value"]),
+        st.dataframe(pd.DataFrame([(k, str(v)) for k, v in summ.items()], columns=["Parameter", "Value"]),
                      use_container_width=True, hide_index=True)
 
         e1, e2, e3 = st.columns(3)
@@ -1161,10 +1140,23 @@ if st.session_state.analysis_done:
         st.markdown('<div class="gcard-hdr">TERRAIN ELEVATION PROFILE</div>',
                     unsafe_allow_html=True)
 
-        elevations = get_elevation_profile(wps)
+        elevations, terrain_source = get_elevation_profile(wps)
         clearance_data = check_terrain_clearance(wps, elevations, altitude)
         terrain_alerts = get_terrain_alerts(clearance_data)
         terrain_summary = get_max_terrain_risk_summary(clearance_data)
+
+        if terrain_source == "LIVE":
+            st.markdown(
+            '<div class="al-ok">✅ LIVE elevation data (Open-Elevation API) '
+            '— terrain results below are real.</div>',
+            unsafe_allow_html=True)
+        else:
+            st.markdown(
+                '<div class="al-crit">⚠️ Elevation API unreachable — showing '
+                'SIMULATED terrain (NOT real data). Do not trust the collision '
+                'results below for actual flight planning. Check your internet '
+                'connection and re-run analysis.</div>',
+                unsafe_allow_html=True)
 
         tc1, tc2, tc3, tc4 = st.columns(4)
         for col, (v, lbl, hx) in zip([tc1, tc2, tc3, tc4], [
@@ -1351,3 +1343,10 @@ if st.session_state.analysis_done:
         else:
             st.markdown('<div class="al-ok">No conflicts detected between UAVs in swarm</div>',
                         unsafe_allow_html=True)
+
+else:
+    # nothing to show on the other screens until a mission has been analysed
+    for _i in range(1, 10):
+        with tabs[_i]:
+            st.markdown('<div class="al-caut">Run ANALYSE MISSION on the FLIGHT PLAN screen first. '
+                        'This screen fills in after the analysis.</div>', unsafe_allow_html=True)

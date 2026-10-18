@@ -6,7 +6,7 @@ All constants, thresholds, API keys, and settings in one place
 # ─────────────────────────────────────────────
 # YOUR API KEY - Already set for you
 # ─────────────────────────────────────────────
-OPENWEATHER_API_KEY = "OPENWEATHER_API_KEY"
+OPENWEATHER_API_KEY = ""
 
 # ─────────────────────────────────────────────
 # UAV PHYSICAL LIMITS
