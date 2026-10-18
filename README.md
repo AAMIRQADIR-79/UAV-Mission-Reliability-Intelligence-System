@@ -122,11 +122,7 @@ Missions outside these limits are reported as out of scope instead of being give
 | **Waypoint Transformer** | Capture risks that come from combinations of distant waypoints | Waypoint sequence | Per-waypoint risk |
 | **Telemetry Autoencoder** (10-16-8-4-8-16-10) | Flag unusual missions without labels | Mission features | Reconstruction error, anomaly flag |
 
-<<<<<<< HEAD
 Architecture diagrams are available in [`assets/architectures/`](assets/architectures/).
-=======
-Architecture diagrams are available in [`docs/architectures/`](docs/architectures/).
->>>>>>> bc112206aac8e5be481eddd6506375408703e75f
 
 ---
 
@@ -136,17 +132,10 @@ Evaluated on a stratified 20 % held-out split of the synthetic dataset (8,000 mi
 
 | Model | Accuracy | AUC-ROC | Parameters |
 |---|---|---|---|
-<<<<<<< HEAD
 | Ensemble (RF + GBM + ET) | 93.25 % | 94.84 % | n/a |
 | Residual MLP | 90.56 % | n/a | 550,273 |
 | BiLSTM + Attention | 95.00 % | n/a | 142,530 |
 | **Waypoint Transformer** | **99.08 %** | n/a | 152,769 |
-=======
-| Ensemble (RF + GBM + ET) | 93.50 % | 94.87 % | n/a |
-| Residual MLP | 90.56 % | n/a | 550,273 |
-| BiLSTM + Attention | 95.33 % | n/a | 142,530 |
-| **Waypoint Transformer** | **98.94 %** | n/a | 152,769 |
->>>>>>> bc112206aac8e5be481eddd6506375408703e75f
 | Autoencoder | unsupervised | n/a | 702 |
 
 > **How to read these numbers.** Labels come from rules based on documented drone operating limits, so these figures show how well each model learned and generalised those rules. They are **not** an estimate of accuracy on real flights. Validation on real flight data is listed in the [Roadmap](#roadmap).
@@ -155,27 +144,15 @@ Evaluated on a stratified 20 % held-out split of the synthetic dataset (8,000 mi
 
 ## Screenshots
 
-<<<<<<< HEAD
-<!-- Replace these with your own screenshots, saved in assets/images/ -->
+<!-- Replace these with your own screenshots, saved in assets/Images/ -->
 
 | Flight Plan | Flight Data |
 |---|---|
-| ![Flight plan](assets/images/flight_plan.png) | ![Flight data](assets/images/flight_data.png) |
+| ![Flight plan](assets/Images/flight_plan.png) | ![Flight data](assets/Images/flight_data.png) |
 
 | Deep Learning | Terrain and RTH |
 |---|---|
-| ![Deep learning](assets/images/deep_learning.png) | ![Terrain and RTH](assets/images/terrain_rth.png) |
-=======
-<!-- Replace these with your own screenshots, saved in docs/images/ -->
-
-| Flight Plan | Flight Data |
-|---|---|
-| ![Flight plan](docs/images/flight_plan.png) | ![Flight data](docs/images/flight_data.png) |
-
-| Deep Learning | Terrain and RTH |
-|---|---|
-| ![Deep learning](docs/images/deep_learning.png) | ![Terrain and RTH](docs/images/terrain_rth.png) |
->>>>>>> bc112206aac8e5be481eddd6506375408703e75f
+| ![Deep learning](assets/Images/deep_learning.png) | ![Terrain and RTH](assets/Images/terrain_rth.png) |
 
 ---
 
@@ -191,13 +168,8 @@ Evaluated on a stratified 20 % held-out split of the synthetic dataset (8,000 mi
 
 ```bash
 # 1. Clone the repository
-<<<<<<< HEAD
 git clone https://github.com/AAMIRQADIR-79/UAV-Mission-Reliability-Intelligence-System.git
 cd UAV-Mission-Reliability-Intelligence-System
-=======
-git clone https://github.com/<your-username>/<repository-name>.git
-cd <repository-name>
->>>>>>> bc112206aac8e5be481eddd6506375408703e75f
 
 # 2. Create and activate a virtual environment
 python -m venv .venv
@@ -253,13 +225,12 @@ Flight data is currently **simulated**. The dashboard labels this as `LINK: SIMU
 .
 ├── app.py                    # Streamlit application
 ├── requirements.txt
-<<<<<<< HEAD
 ├── test_alerts.py            # Alert rule tests
 ├── .streamlit/               # Streamlit theme and settings
 ├── models/                   # Cached trained models (generated on first run)
 ├── exports/                  # Generated mission reports
 ├── assets/
-│   ├── images/               # README screenshots
+│   ├── Images/               # README screenshots
 │   └── architectures/        # Model architecture diagrams
 └── utils/
     ├── config.py             # Features, drone specs, mission types
@@ -276,31 +247,7 @@ Flight data is currently **simulated**. The dashboard labels this as `LINK: SIMU
     ├── swarm.py              # Multi-drone conflict detection
     ├── data_generator.py     # Synthetic mission dataset generator
     └── ui_theme.py           # Mission Planner-style theme, HUD, dials
-=======
-├── models/                   # Cached trained models (generated on first run)
-├── utils/
-│   ├── config.py             # Features, drone specs, mission types
-│   ├── geocoding.py          # Place and coordinate handling
-│   ├── place_search.py       # Nearby-first, typo-tolerant place suggestions
-│   ├── weather.py            # OpenWeatherMap client with simulated fallback
-│   ├── terrain.py            # Elevation profile and terrain clearance
-│   ├── scope_check.py        # 100 km / 400 m / battery scope guard
-│   ├── ml_model.py           # Tree ensemble training and prediction
-│   ├── deep_learning.py      # MLP, BiLSTM, Transformer, Autoencoder
-│   ├── alerts.py             # Alert rules and battery drain estimate
-│   ├── rth.py                # Return-to-home and emergency landing
-│   ├── gps_resilience.py     # GPS-loss simulation and dead reckoning
-│   ├── swarm.py              # Multi-drone conflict detection
-│   ├── visualizations.py     # Charts
-│   └── ui_theme.py           # Mission Planner-style theme, HUD, dials
-├── docs/
-│   ├── architectures/        # Model architecture diagrams
-│   └── images/               # README screenshots
-└── tests/                    # Rule-check test cases
->>>>>>> bc112206aac8e5be481eddd6506375408703e75f
 ```
-
-> Adjust this tree to match your repository before publishing.
 
 ---
 
